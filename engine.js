@@ -1,8 +1,7 @@
 /*************************************************************************
- * 麻雀 実戦何切るトレーナー 厳密解析＆10大戦術難問エンジン (engine.js)
- * - シャンテン数厳密検証（0 / 1 / 2 / 3シャンテン）＋2手先読み評価
- * - 高打点飽和対応・多面張枚数最優先ソルバー＆三暗刻/対々和/符計算対応
- * - 数値大小関係に完全準拠した1対1比較解説ジェネレーター
+ * 麻雀 実戦何切るトレーナー 厳密解析＆10種バランス難問エンジン (engine.js)
+ * - 一通・チンイツ偏重を解消し、10種類の異なる戦術カテゴリを均等出題
+ * - 0 / 1 / 2 / 3シャンテン厳密検証・高打点飽和・1対1比較解説
  *************************************************************************/
 
 const isYaochu = (idx) => idx >= 27 || (idx % 9 === 0) || (idx % 9 === 8);
@@ -98,7 +97,7 @@ function calcStandardShantenFromCounts(counts) {
   return minSh;
 }
 
-/* 2. 14枚アガリ役・符・打点計算（完全面子分解） */
+/* 2. 14枚アガリ役・符・打点計算 */
 function evaluateWinning14(counts14, winTile, roundWind, seatWind, doraIdx) {
   const doraCount = counts14[doraIdx];
   const allTiles = [];
@@ -269,7 +268,7 @@ function evaluate13Tenpai(counts13, visibleCounts, roundWind, seatWind, doraIdx)
   };
 }
 
-/* 3. 2〜3シャンテン専用：ブロック分解に基づく厳密な手役・好形評価器 */
+/* 3. 2〜3シャンテン専用：ブロック・手役・好形評価器 */
 function hasValidIttsuBlocks(counts13, suitOffset) {
   const c = counts13.slice(suitOffset, suitOffset + 9);
   const seg1 = (c[0] > 0 ? 1 : 0) + (c[1] > 0 ? 1 : 0) + (c[2] > 0 ? 1 : 0);
@@ -294,10 +293,12 @@ function evaluate2And3ShantenStructure(counts13, doraIdx) {
   const doraCnt = counts13[doraIdx];
 
   const suitCounts = [0, 0, 0];
-  let honorCnt = 0, yaoCnt = 0;
+  let honorCnt = 0, yaoCnt = 0, koutsuSeedCnt = 0, pairCnt = 0;
   for (let i = 0; i < 34; i++) {
     const c = counts13[i];
     if (!c) continue;
+    if (c >= 3) koutsuSeedCnt++;
+    if (c >= 2) pairCnt++;
     if (isYaochu(i)) yaoCnt += c;
     if (i < 27) suitCounts[Math.floor(i / 9)] += c;
     else honorCnt += c;
@@ -305,22 +306,27 @@ function evaluate2And3ShantenStructure(counts13, doraIdx) {
 
   const maxSuit = Math.max(...suitCounts);
   if (maxSuit + honorCnt === 13) {
-    score += honorCnt === 0 ? 160 : 110;
+    score += honorCnt === 0 ? 150 : 105;
     tags.push(honorCnt === 0 ? '清一色' : '混一色');
   }
 
   if (yaoCnt === 0) {
-    score += 65;
+    score += 60;
     tags.push('断幺九');
   }
-
+  if (koutsuSeedCnt >= 2) {
+    score += 45;
+    tags.push('暗刻・対子系');
+  } else if (pairCnt >= 3) {
+    score += 35;
+    tags.push('対子系');
+  }
   if (hasValidSanshokuBlocks(counts13)) {
     score += 75;
     tags.push('三色同順');
   }
-
   if (hasValidIttsuBlocks(counts13, 0) || hasValidIttsuBlocks(counts13, 9) || hasValidIttsuBlocks(counts13, 18)) {
-    score += 70;
+    score += 65;
     tags.push('一気通貫');
   }
 
@@ -370,7 +376,7 @@ function analyze14Hand(hand14, roundWind, seatWind, doraInd, category = 'auto') 
   const suitTotals = [0, 0, 0];
   let honorTotal = 0;
   hand14.forEach(t => { if (t < 27) suitTotals[Math.floor(t / 9)]++; else honorTotal++; });
-  const isFlushHand = (Math.max(...suitTotals) + honorTotal >= 13) || category.startsWith('menchin');
+  const isFlushHand = (Math.max(...suitTotals) + honorTotal >= 13) || category === 'menchin_0s';
 
   const currentShanten = calcStandardShantenFromCounts([...fullCounts]);
   const uniqueDiscards = Array.from(new Set(hand14)).sort((a, b) => a - b);
@@ -506,7 +512,6 @@ function analyze14Hand(hand14, roundWind, seatWind, doraInd, category = 'auto') 
               let ukCnt = 0, ukTypes = 0;
               for (let t2 = 0; t2 < 34; t2++) {
                 if (counts13[t2] >= 4) continue;
-                // visible[t2] には元の手牌とドラ表示牌が含まれるため、draw 自身を引いた分だけ 1 減算
                 const r2 = Math.max(0, 4 - visible[t2] - (t2 === draw ? 1 : 0));
                 if (r2 <= 0) continue;
                 counts13[t2]++;
@@ -659,23 +664,24 @@ function buildReasoningText(prob, userTile) {
   return msg;
 }
 
-/* 6. 10大戦術アーキタイプ＋シャンテン数厳密検証つき難問生成アルゴリズム */
+/* 6. 10種類の異なる戦術カテゴリを均等ローテーション出題する難問ジェネレーター */
 const ARCHETYPE_QUEUE = [];
 const RECENT_HAND_HASHES = [];
 
 function getNextArchetype() {
   if (ARCHETYPE_QUEUE.length === 0) {
+    // 一通・チンイツ偏重を避け、10種類の異なる戦術を1巡ずつシャッフル出題
     const all = [
-      '2shanten_6block_choice',
-      '1shanten_slide_tanyao',
-      '3shanten_block_build',
-      '1shanten_headless_kuttsuki',
-      '2shanten_yaku_plan',
-      '1shanten_sanshoku_ittsu',
-      'menchin_multitenpai',
-      '1shanten_three_pairs',
-      'normal_multitenpai',
-      'menchin_honitsu_1shanten'
+      'sanshoku_1s',
+      'niduke_2s',
+      'pinfu_tanyao_1s',
+      'yaku_plan_2s',
+      'headless_kuttsuki_1s',
+      'shanten3_build',
+      'three_pairs_1s',
+      'multi_wait_0s',
+      'sanankou_koutsu_1s',
+      'menchin_0s'
     ];
     for (let i = all.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -719,7 +725,85 @@ function tryBuildHardProblem(category) {
   let expectedShanten = 1;
   let label = '';
 
-  if (category === 'menchin_multitenpai') {
+  if (category === 'sanshoku_1s') {
+    expectedShanten = 1;
+    label = '1シャンテン 三色同順・好形ブロック選択';
+    const pos = pickRandom([1, 2, 3]);
+    const extraP = pickRandom([4, 5, 6]);
+    if (!addSuit(s1, [pos, pos + 1, pos + 2, extraP, extraP])) return null;
+    if (!addSuit(s2, [pos, pos + 1, pos + 2, 2, 3])) return null;
+    if (!addSuit(s3, [pos, pos + 1, 5, 6])) return null;
+    targetDoraTile = s3 + mp(pos + 1);
+  } else if (category === 'pinfu_tanyao_1s') {
+    expectedShanten = 1;
+    label = '1シャンテン 平和・タンヤオ・両面ターツ選択';
+    const m1 = pickRandom([1, 2, 3, 4]);
+    const m2 = pickRandom([1, 2, 3, 4]);
+    const pairP = pickRandom([2, 3, 4, 5]);
+    if (!addSuit(s1, [m1, m1 + 1, m1 + 2, pairP, pairP])) return null;
+    if (!addSuit(s2, [m2, m2 + 1, m2 + 2, 1, 2])) return null;
+    if (!addSuit(s3, [3, 4, 6, 7])) return null;
+    targetDoraTile = s2 + mp(pairP);
+  } else if (category === 'headless_kuttsuki_1s') {
+    expectedShanten = 1;
+    label = '1シャンテン ヘッドレス・くっつき選択';
+    const a1 = pickRandom([1, 2, 3]);
+    const a2 = pickRandom([1, 2, 3]);
+    if (!addSuit(s1, [a1, a1 + 1, a1 + 2])) return null;
+    if (!addSuit(s2, [a2, a2 + 1, a2 + 2, 2, 3, 6, 7])) return null;
+    if (!addSuit(s3, [4, 5, 6, 7])) return null;
+    targetDoraTile = s3 + mp(5);
+  } else if (category === 'three_pairs_1s') {
+    expectedShanten = 1;
+    label = '1シャンテン 3対子・複合ターツ選択';
+    const m1 = pickRandom([1, 2, 3]);
+    const m2 = pickRandom([1, 2, 3]);
+    if (!addSuit(s1, [m1, m1 + 1, m1 + 2, 5, 5])) return null;
+    if (!addSuit(s2, [m2, m2 + 1, m2 + 2, 7, 7])) return null;
+    if (!addSuit(s3, [3, 3, 5, 6])) return null;
+    targetDoraTile = s1 + mp(5);
+  } else if (category === 'sanankou_koutsu_1s') {
+    expectedShanten = 1;
+    label = '1シャンテン 暗刻・三暗刻・順子バランス';
+    const k1 = pickRandom([1, 2, 3, 4, 5]);
+    const k2 = pickRandom([2, 3, 4, 5, 6]);
+    const pairP = pickRandom([2, 3, 4, 5]);
+    if (!addSuit(s1, [k1, k1, k1, pairP, pairP])) return null;
+    if (!addSuit(s2, [k2, k2, k2, 1, 2])) return null;
+    if (!addSuit(s3, [3, 4, 6, 7])) return null;
+    targetDoraTile = s1 + mp(k1);
+  } else if (category === 'niduke_2s') {
+    expectedShanten = 2;
+    label = '2シャンテン→1シャンテン 二度受け・ブロック整理';
+    if (!addSuit(s1, [1, 2, 3, 2, 3])) return null;
+    if (!addSuit(s2, [2, 3, 5, 6])) return null;
+    if (!addSuit(s3, [3, 4, 6, 6, 7])) return null;
+    targetDoraTile = s2 + mp(3);
+  } else if (category === 'yaku_plan_2s') {
+    expectedShanten = 2;
+    label = '2シャンテン→1シャンテン 手役・好形構想';
+    const pos = pickRandom([1, 2, 3]);
+    if (!addSuit(s1, [pos, pos + 1, pos + 2, pos + 4, pos + 5])) return null;
+    if (!addSuit(s2, [pos, pos + 1, pos + 4, pos + 5])) return null;
+    if (!addSuit(s3, [pos, pos + 2, pos + 4, pos + 5])) return null;
+    targetDoraTile = s2 + mp(pos + 1);
+  } else if (category === 'shanten3_build') {
+    expectedShanten = 3;
+    label = '3シャンテン→2シャンテン 序盤ブロック構想';
+    const pos = pickRandom([1, 2, 3]);
+    if (!addSuit(s1, [pos, pos + 1, pos + 4, pos + 5])) return null;
+    if (!addSuit(s2, [pos, pos + 2, pos + 4, pos + 5])) return null;
+    if (!addSuit(s3, [pos, pos + 1, pos + 4, pos + 5, pos + 7])) return null;
+    targetDoraTile = s3 + mp(pos + 1);
+  } else if (category === 'multi_wait_0s') {
+    expectedShanten = 0;
+    label = '複合形 多面待ちテンパイ選択';
+    const st = pickRandom([1, 2, 3, 4]);
+    if (!addSuit(s1, [st, st + 1, st + 2])) return null;
+    if (!addSuit(s2, [2, 3, 4, 5, 5])) return null;
+    if (!addSuit(s3, [2, 3, 3, 4, 5, 6])) return null;
+    targetDoraTile = s3 + mp(3);
+  } else {
     expectedShanten = 0;
     label = 'メンチン(清一色) 多面張テンパイ選択';
     const patterns14 = [
@@ -731,143 +815,6 @@ function tryBuildHardProblem(category) {
     ];
     if (!addSuit(s1, pickRandom(patterns14))) return null;
     targetDoraTile = s1 + mp(pickRandom([2, 3, 4, 5]));
-  } else if (category === 'menchin_honitsu_1shanten') {
-    expectedShanten = 1;
-    const isMenchin = Math.random() < 0.55;
-    label = isMenchin ? 'メンチン(清一色) 1シャンテン最大受け入れ' : 'ホンイツ(混一色) 1シャンテン最大受け入れ';
-    if (!isMenchin) {
-      const h = pickRandom([27, seatWindIdx, 31, 32, 33]);
-      if (!add([h, h, h])) return null;
-      const p11 = [
-        [1, 2, 2, 4, 4, 5, 6, 6, 7, 8, 8],
-        [0, 1, 2, 4, 4, 5, 5, 7, 7, 8, 8],
-        [1, 1, 2, 3, 5, 5, 6, 6, 7, 8, 8]
-      ];
-      if (!addSuit(s1, pickRandom(p11))) return null;
-    } else {
-      const p14 = [
-        [1, 2, 2, 4, 4, 4, 6, 6, 7, 7, 7, 8, 8, 8],
-        [1, 1, 2, 2, 4, 5, 5, 6, 6, 7, 8, 8, 8, 8]
-      ];
-      if (!addSuit(s1, pickRandom(p14))) return null;
-    }
-    targetDoraTile = s1 + mp(pickRandom([3, 4, 5]));
-  } else if (category === 'normal_multitenpai') {
-    expectedShanten = 0;
-    label = '複合形 多面張テンパイ選択';
-    const sub = pickRandom([0, 1, 2]);
-    const st = pickRandom([1, 2, 3, 4]);
-    if (sub === 0) {
-      if (!addSuit(s1, [1, 2, 2, 3, 3, 4, 4, 5])) return null;
-      if (!addSuit(s2, [st, st + 1, st + 2])) return null;
-      if (!addSuit(s3, [2, 3, 3])) return null;
-    } else if (sub === 1) {
-      if (!addSuit(s1, [2, 3, 3, 4, 4, 5, 6])) return null;
-      if (!addSuit(s2, [2, 3, 4, 5])) return null;
-      if (!addSuit(s3, [st, st + 1, st + 2])) return null;
-    } else {
-      if (!addSuit(s1, [2, 3, 4, 4, 4, 5, 6, 6])) return null;
-      if (!addSuit(s2, [st, st + 1, st + 2])) return null;
-      if (!addSuit(s3, [3, 4, 5])) return null;
-    }
-    targetDoraTile = s1 + mp(3);
-  } else if (category === '1shanten_slide_tanyao') {
-    expectedShanten = 1;
-    label = '1シャンテン 順子組み替え・手役移行';
-    const sub = pickRandom([0, 1, 2]);
-    if (sub === 0) {
-      if (!addSuit(s1, [0, 1, 2, 3, 4, 4, 5, 6, 7])) return null;
-      const p2 = pickRandom([2, 3, 4, 5]);
-      if (!addSuit(s2, [p2, p2 + 1])) return null;
-      const p3 = pickRandom([1, 2, 3, 4]);
-      if (!addSuit(s3, [p3, p3 + 1, p3 + 1])) return null;
-      targetDoraTile = s3 + mp(p3);
-    } else if (sub === 1) {
-      if (!addSuit(s1, [1, 2, 3, 4, 5, 5, 6, 7, 8])) return null;
-      const p2 = pickRandom([2, 3, 4]);
-      if (!addSuit(s2, [p2, p2 + 1])) return null;
-      const p3 = pickRandom([2, 3, 4]);
-      if (!addSuit(s3, [p3, p3, p3 + 1])) return null;
-      targetDoraTile = s2 + mp(p2);
-    } else {
-      if (!addSuit(s1, [0, 1, 2, 3, 4, 5, 6])) return null;
-      if (!addSuit(s2, [2, 3, 4, 5])) return null;
-      if (!addSuit(s3, [2, 3, 3])) return null;
-      targetDoraTile = s2 + mp(3);
-    }
-  } else if (category === '1shanten_sanshoku_ittsu') {
-    expectedShanten = 1;
-    label = '1シャンテン 三色・一通と好形受け入れの選択';
-    const pos = pickRandom([1, 2, 3]);
-    if (!addSuit(s1, [pos, pos + 1, pos + 2, pos + 3, pos + 3])) return null;
-    if (!addSuit(s2, [pos, pos + 1, pos + 2, pos + 4, pos + 5])) return null;
-    if (!addSuit(s3, [pos, pos + 1, pos + 3, pos + 4])) return null;
-    targetDoraTile = s3 + mp(pos + 1);
-  } else if (category === '1shanten_headless_kuttsuki') {
-    expectedShanten = 1;
-    label = '1シャンテン ヘッドレス・複合くっつき選択';
-    const sub = pickRandom([0, 1]);
-    if (sub === 0) {
-      if (!addSuit(s1, [1, 2, 3, 4, 5])) return null;
-      if (!addSuit(s2, [2, 3, 4, 5, 6])) return null;
-      if (!addSuit(s3, [2, 3, 4, 6])) return null;
-      targetDoraTile = s1 + mp(3);
-    } else {
-      if (!addSuit(s1, [1, 2, 3, 5, 6])) return null;
-      if (!addSuit(s2, [2, 3, 4, 6, 7])) return null;
-      if (!addSuit(s3, [2, 3, 4])) return null;
-      targetDoraTile = s2 + mp(4);
-    }
-  } else if (category === '1shanten_three_pairs') {
-    expectedShanten = 1;
-    label = '1シャンテン 3対子・一盃口・複合ターツ選択';
-    if (!addSuit(s1, [1, 1, 2, 2, 3])) return null;
-    if (!addSuit(s2, [2, 3, 4, 5, 5])) return null;
-    if (!addSuit(s3, [2, 3, 4])) return null;
-    targetDoraTile = s1 + mp(2);
-  } else if (category === '2shanten_6block_choice') {
-    expectedShanten = 2;
-    label = '2シャンテン→1シャンテン 6ブロック比較・二度受け整理';
-    const sub = pickRandom([0, 1, 2]);
-    if (sub === 0) {
-      if (!addSuit(s1, [1, 2, 3, 5, 6])) return null;
-      if (!addSuit(s2, [2, 3, 4, 6, 7])) return null;
-      if (!addSuit(s3, [2, 3, 5, 6])) return null;
-      targetDoraTile = s2 + mp(3);
-    } else if (sub === 1) {
-      if (!addSuit(s1, [1, 2, 3, 5, 5])) return null;
-      if (!addSuit(s2, [2, 2, 3, 5, 5])) return null;
-      if (!addSuit(s3, [3, 4, 4, 6])) return null;
-      targetDoraTile = s3 + mp(3);
-    } else {
-      if (!addSuit(s1, [2, 3, 4, 6, 7])) return null;
-      if (!addSuit(s2, [1, 2, 4, 5])) return null;
-      if (!addSuit(s3, [2, 3, 5, 6, 6])) return null;
-      targetDoraTile = s1 + mp(3);
-    }
-  } else if (category === '2shanten_yaku_plan') {
-    expectedShanten = 2;
-    label = '2シャンテン→1シャンテン 手役・好形構想';
-    const pos = pickRandom([1, 2, 3]);
-    if (Math.random() < 0.55) {
-      if (!addSuit(s1, [pos, pos + 1, pos + 2, pos + 4, pos + 5])) return null;
-      if (!addSuit(s2, [pos, pos + 1, pos + 4, pos + 5])) return null;
-      if (!addSuit(s3, [pos, pos + 2, pos + 4, pos + 5])) return null;
-      targetDoraTile = s2 + mp(pos + 1);
-    } else {
-      if (!addSuit(s1, [0, 1, 2, 3, 4, 6, 8])) return null;
-      if (!addSuit(s2, [2, 3, 5, 6])) return null;
-      if (!addSuit(s3, [3, 4, 4])) return null;
-      targetDoraTile = s1 + mp(6);
-    }
-  } else {
-    expectedShanten = 3;
-    label = '3シャンテン→2シャンテン 序盤ブロック・手役構想';
-    const pos = pickRandom([1, 2, 3]);
-    if (!addSuit(s1, [pos, pos + 1, pos + 4, pos + 5])) return null;
-    if (!addSuit(s2, [pos, pos + 2, pos + 4, pos + 5])) return null;
-    if (!addSuit(s3, [pos, pos + 1, pos + 4, pos + 5, pos + 7])) return null;
-    targetDoraTile = s3 + mp(pos + 1);
   }
 
   const hand14 = [];
@@ -893,7 +840,7 @@ function tryBuildHardProblem(category) {
   const third = analysis.candidates[2];
 
   if (best.scoreMetric <= second.scoreMetric) return null;
-  if (sh === 0 || category.startsWith('menchin')) {
+  if (sh === 0 || category === 'menchin_0s') {
     if (best.ukeireCount <= second.ukeireCount) return null;
     if (best.ukeireCount - second.ukeireCount > 6) return null;
   } else {
@@ -921,20 +868,20 @@ function generateInfiniteProblem() {
     const p = tryBuildHardProblem(arch);
     if (p) return p;
   }
-  const fb = [3, 4, 9, 10, 11, 12, 13, 13, 14, 15, 16, 19, 20, 20];
+  const fb = [1, 2, 3, 5, 5, 10, 11, 12, 19, 20, 22, 23, 25, 26];
   return {
     roundWindIdx: 27,
     seatWindIdx: 28,
-    doraIndicatorIdx: 12,
+    doraIndicatorIdx: 4,
     hand14: fb,
-    problemLabel: '1シャンテン 順子組み替え・手役移行',
-    analysis: analyze14Hand(fb, 27, 28, 12, 'auto')
+    problemLabel: '1シャンテン 平和・タンヤオ・両面ターツ選択',
+    analysis: analyze14Hand(fb, 27, 28, 4, 'pinfu_tanyao_1s')
   };
 }
 
 /* 7. UIコントローラ＆イベントバインディング */
-const STORAGE_KEY_REVIEW = 'mahjong_nanikiru_review_v8';
-const STORAGE_KEY_STATS  = 'mahjong_nanikiru_stats_v8';
+const STORAGE_KEY_REVIEW = 'mahjong_nanikiru_review_v9';
+const STORAGE_KEY_STATS  = 'mahjong_nanikiru_stats_v9';
 
 const state = {
   currentProb: null, answered: false, isReviewMode: false,
